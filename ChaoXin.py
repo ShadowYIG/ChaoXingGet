@@ -4,15 +4,25 @@
 # @Author  : ShadowY
 # @File    : ChaoXin.py
 # @Software: PyCharm
+# @version : 1.5
 # 该程序为获取超星学习通的课程资料（视频，ppt）等，直接运行即可使用
+"""
+1.5 修复新接口无法获取非视频资源问题
+1.4 更换新接口，修复二级目录无法下载问题
+1.3 新增调用IDM下载选项
+1.2 绕过验证码，修复bug
+1.1 添加全局变量实现免多次输入，增加强制获取
+1.0 实现超星课件，视频下载
+"""
 import os
 import requests
-import json
+from subprocess import call
 import random
 import time
 import re
 import json
 import sys
+import pprint
 from tqdm import tqdm
 from urllib import parse
 from lxml import etree
@@ -23,6 +33,14 @@ headers = {
     'Referer': 'http://i.mooc.chaoxing.com',
     'X-Forwarded-For': ip,
 }
+
+"""请填写该全局变量，以便更好地体验"""
+IDM_DIR = r"E:\Internet Download Manager\IDMan.exe"  # idm的路径,如果有就改成自己的，否则不要用idm下载
+# 登陆信息，填了可以省略输入
+USERNAME = ""  # 用户名
+PASSWD = ""  # 密码
+"""请填写该全局变量，以便更好地体验"""
+
 
 def login_cx(username, pwd, fid_name='广州商学院'):
     """
@@ -74,6 +92,29 @@ def login_cx(username, pwd, fid_name='广州商学院'):
         return False
 
 
+def login_cx_unv(username, pwd, fid_name='广州商学院'):
+    """
+    超星登陆，绕过验证码
+    :param username: 用户名（学号）
+    :param pwd: 密码
+    :param fid_name: 学校名称
+    :return:
+    """
+    cx_session = requests.Session()
+    r = cx_session.get(
+        'https://passport2.chaoxing.com/api/login?name={}&pwd={}&schoolid={}&verify=0'.format(username, pwd, get_fid(fid_name)), headers=headers)
+    if r.status_code == 403:
+        print("网络错误")
+        return False
+    data = json.loads(r.text)
+    if data['result']:
+        print("登录成功")
+        return cx_session
+    else:
+        print("登录信息有误")
+        return False
+
+
 def download_code_img(cx_session):
     """
     获取验证码图片
@@ -100,6 +141,7 @@ def get_fid(name='广州商学院'):
     if data.status_code == 200:
         msg = json.loads(data.text)
         try:
+            print(msg['froms'][0]['schoolid'])
             return msg['froms'][0]['schoolid']
         except:
             print("获取学校代码失败或校名不存在")
@@ -124,7 +166,7 @@ def get_all_course(cx_session):
         course_id = info.xpath("input/@value")[0]
         class_id = info.xpath("input/@value")[1]
         course_url = info.xpath("div[@class='Mconright httpsClass']//a/@href")[0]
-        course_name = info.xpath("div[@class='Mconright httpsClass']//a/@title")[0].replace(' ', '')
+        course_name = info.xpath("div[@class='Mconright httpsClass']//a/@title")[0].replace(u'\xa0', '').replace(' ', '')
         course_list.append({
             'course': course_id,
             'class': class_id,
@@ -183,6 +225,7 @@ def get_all_chapter(cx_session, url, op=0):
             return False
         re_data = re.search(r'chapterId=(\d+).*?courseId=(\d+).*?clazzid=(\d+)', info)   # 通过课程链接url获取需要的信息
         chapter_list.append({'chapterId': re_data[1], 'courseId': re_data[2], 'clazzId': re_data[3], 'url': info})
+
     return chapter_list
 
 
@@ -213,7 +256,78 @@ def force_get_all_chapter(cx_session, url, op=0):
         re_data = re.search(r'courseId=(\d+)&knowledgeId=(\d+)', info)  # 通过课程链接url获取需要的信息
         url = "/mycourse/studentstudy?chapterId=" + re_data[2] + "&courseId=" + re_data[1] + "&clazzid=" + clazz_id
         chapter_list.append({'chapterId': re_data[2], 'courseId': re_data[1], 'clazzId': clazz_id, 'url': url})
+    pprint.pprint(chapter_list)
     return chapter_list
+
+
+def get_all_objectid_by_json(cx_session, clazz_id, op):
+    """
+        获取某个单元所有下载objectid
+        :param cx_session: session
+        :param clazz_id: 课程链接
+        :param op: 选项 0为全部获取，1-n为某单元
+        :return: list objectid
+    """
+    print(clazz_id)
+    # need_type = '.type(video)'
+    need_type = ''
+    url = 'http://mooc1-api.chaoxing.com/gas/clazz?id=' + clazz_id + '&fields=id,bbsid,classscore,allowdownload,isstart,chatid,name,state,isthirdaq,information,discuss,visiblescore,begindate,course.fields(id,infocontent,name,objectid,classscore,bulletformat,imageurl,privately,teacherfactor,unfinishedJobcount,jobcount,state,knowledge.fields(id,name,indexOrder,parentnodeid,status,layer,label,begintime,attachment.fields(id,type,objectid,extension,name)'+need_type+'))&view=json'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/30.0.1599.17 Safari/537.36',
+        'contentType': 'utf-8',
+        'Accept-Language': 'zh_CN',
+        'Host': 'mooc1-api.chaoxing.com',
+        'Connection': 'Keep-Alive',
+        'Accept-Encoding': 'gzip'
+    }
+    res = cx_session.get(url, headers=headers)
+    info_json = json.loads(res.text)['data'][0]['course']['data'][0]['knowledge']['data']
+    dl_list = list()
+    for i in range(len(info_json)):
+        if info_json[i]['label'][0:len(str(op))] == str(op):  # 仅要所选章节
+            datas = info_json[i]['attachment']['data']
+            for data in datas:
+                try:
+                    extension = data['extension']
+                    object_id = data['objectid']
+                    dl_list.append({
+                        'ext': extension,
+                        'id': object_id,
+                    })
+                except KeyError:
+                    pass
+
+    return dl_list
+
+
+def get_download_info(cx_session, object_id_list, types):
+    """
+    获取下载文件的信息
+    :param cx_session:
+    :param objectid_list: 对象id列表
+    :param types: 一个类型列表，如['mp4','pdf],全部则为all
+    :return:
+    """
+    url = "https://mooc1-2.chaoxing.com/ananas/status/"
+    dl_list = list()
+    for object_id in object_id_list:
+        print(object_id)
+        res = cx_session.get(url+str(object_id['id']), headers=headers)
+        print(res.text)
+        dl_info = json.loads(res.text)
+        filename = dl_info['filename']
+        dl_link = dl_info['download']
+        object_size = dl_info['length']
+        extension = object_id['ext']
+        if ('all' in types) or (extension in types):
+            dl_list.append({
+                    'id': str(object_id['id']),
+                    'size': object_size,
+                    'ext': extension,
+                    'name': filename,
+                    'link': dl_link
+                })
+    return dl_list
 
 
 def get_all_chapter_link(cx_session, chapter_list, types):
@@ -286,13 +400,14 @@ def get_one_chapter_link(cx_session, courseId, clazzid, knowledgeid, types):
     return data_list
 
 
-def download_file_mgr(cx_session, dl_list, dst='', op=0):
+def download_file_mgr(cx_session, dl_list, dst='', op=0, idm=0):
     """
         下载文件管理者
         :param cx_session: session
         :param dl_list: 需要下载的课程列表
         :param dst: 保存的目录，仅为目录，不需要文件名
         :param op: 0不分开保存 1分扩展名保存
+        :param idm: 0不使用idm下载 1使用idm下载
         :return: boolean 下载结果
     """
     '''此处预留多文件断点下载代码,先注释，因为懒所以先不做了'''
@@ -313,14 +428,25 @@ def download_file_mgr(cx_session, dl_list, dst='', op=0):
     else:  # 不分目录保存
         url_list = [{'url': url + dl_list[i]['id'], 'dst': dst, 'name': dl_list[i]['name'], 'size': dl_list[i]['size']} for i in range(len(dl_list))]
     count = len(url_list)  # 用于计数
-    for dl in url_list:
-        count -= 1
-        if not os.path.exists(dl['dst']):  # 创建对应目录
-            os.makedirs(dl['dst'])
-        print("\n正在下载第%d个【%s】  共%d个文件，还剩%d个文件，已下载完成%d个文件" % (len(url_list)-count, dl['name'], len(url_list), count, len(url_list)-count-1))
-        if down_from_url(cx_session, dl['url'], dl['dst'] + dl['name'], dl['size']) == int(dl['size']):  # 下载文件
-            print("\n下载完成第%d个【%s】\n"%(len(url_list)-count, dl['name']))
-    print("\n已完成全部下载任务，下载根目录为%s\n" % dst)
+    if idm == 1:
+        for dl in url_list:
+            call([IDM_DIR, '/d', dl['url'], '/p', dl['dst'], '/f', dl['name'], '/n', '/a'])
+        call([IDM_DIR, '/s'])
+    else:
+        for dl in url_list:
+            count -= 1
+            if not os.path.exists(dl['dst']):  # 创建对应目录
+                os.makedirs(dl['dst'])
+            print("\n正在下载第%d个【%s】  共%d个文件，还剩%d个文件，已下载完成%d个文件" % (len(url_list)-count, dl['name'], len(url_list), count, len(url_list)-count-1))
+            if down_from_url(cx_session, dl['url'], dl['dst'] + dl['name'], dl['size']) == int(dl['size']):  # 下载文件
+                print("\n下载完成第%d个【%s】\n"%(len(url_list)-count, dl['name']))
+        print("\n已完成全部下载任务，下载根目录为%s\n" % dst)
+
+
+def down_used_idm(idm_dir, url_list, save_dir):
+    for ul in url_list:
+        call([idm_dir, '/d', ul, '/p', save_dir, '/n', '/a'])
+    call([idm_dir, '/s'])
 
 
 def down_from_url(cx_session, url, dst, size):
@@ -363,8 +489,14 @@ def user_select_func():
         用于管理用户选项并调用对应程序以及生成用户选项菜单
     """
     err_time = 0  # 错误次数，错误超过三次则退出程序
-    user_name = input("请输入用户名(学号)：")
-    user_pwd = input("请输入密码：")
+    user_name = ""
+    user_pwd = ""
+    if not USERNAME and not PASSWD:  # 如果没设置全局变量则输入
+        user_name = input("请输入用户名(学号)：")
+        user_pwd = input("请输入密码：")
+    else:
+        user_name = USERNAME
+        user_pwd = PASSWD
     code = input("请问是否输入校名？不输入则默认{广州商学院}【y/n】:")
     school = '广州商学院'
     while code not in ['y', 'Y', 'n', 'N']:
@@ -375,7 +507,8 @@ def user_select_func():
         code = input("请问是否输入校名？不输入则默认{广州商学院}【y/n】:")
     if code == 'y' or code == 'Y':
         school = input('你的校名是：')
-    cx = login_cx(user_name, user_pwd, school)
+    # cx = login_cx(user_name, user_pwd, school)
+    cx = login_cx_unv(user_name, user_pwd, school)  # 修改为免验证码登陆
     err_time = 0
     while not cx:
         err_time += 1
@@ -384,7 +517,8 @@ def user_select_func():
         print("登陆失败，请重新登陆")
         user_name = input("请输入用户名(学号)：")
         user_pwd = input("请输入密码：")
-        cx = login_cx(user_name, user_pwd, school)
+        # cx = login_cx(user_name, user_pwd, school)
+        cx = login_cx_unv(user_name, user_pwd, school)  # 修改为免验证码登陆
     # 初始化信息
     course_list = ''
     unit_list = ''
@@ -459,7 +593,7 @@ def user_select_func():
                 if err_time > 3:
                     return False
                 print("输入错误，请重新输入")
-                code = eval(input("\n请输入课程编号："))
+                code = eval(input("\n请输入单元编号："))
             if code == 0:
                 return True
             elif code == -1:
@@ -473,43 +607,63 @@ def user_select_func():
                     flag = 0
                 else:
                     flag = code
-                chapter_id_list = get_all_chapter(cx, course_url, flag)
-                print("开始获取单元数据")
-                force = 0
-                err_time = 0
-                while not chapter_id_list:
-                    err_time += 1
-                    if err_time > 3:
-                        code = input("请问是否尝试强制获取数据【y/n】：")
-                        err_time = 0
-                        while code not in ['y', 'Y', 'n', 'N']:
-                            err_time += 1
-                            if err_time > 3:
-                                return False
-                            print("输入错误，请重新输入\n")
-                            code = input("请问是否指定文件下载路径【y/n】：")
-                        if code == 'y' or code == 'Y':
-                            force = 1
-                        else:
-                            return False  # 不强制获取则直接退出
-                        break
-                    chapter_id_list = get_all_chapter(cx, course_url, flag)
-                    print("获取单元数据失败，5秒后尝试再次获取")
-                    time.sleep(5)
-                if force == 1:  # 强制获取数据
+                # chapter_id_list = get_all_chapter(cx, course_url, flag)
+                # print("开始获取单元数据")
+                # force = 0
+                # err_time = 0
+                # while not chapter_id_list:
+                #     err_time += 1
+                #     if err_time > 3:
+                #         code = input("请问是否尝试强制获取数据【y/n】：")
+                #         err_time = 0
+                #         while code not in ['y', 'Y', 'n', 'N']:
+                #             err_time += 1
+                #             if err_time > 3:
+                #                 return False
+                #             print("输入错误，请重新输入\n")
+                #             code = input("请问是否指定文件下载路径【y/n】：")
+                #         if code == 'y' or code == 'Y':
+                #             force = 1
+                #         else:
+                #             return False  # 不强制获取则直接退出
+                #         break
+                #     chapter_id_list = get_all_chapter(cx, course_url, flag)
+                #     print("获取单元数据失败，5秒后尝试再次获取")
+                #     time.sleep(5)
+
+                # force = 1
+                #
+                # if force == 1:  # 强制获取数据
+                #     err_time = 0
+                #     print("开始强制获取单元数据")
+                #     chapter_id_list = force_get_all_chapter(cx, course_url, flag)
+                #     while not chapter_id_list:
+                #         err_time += 1
+                #         if err_time > 3:
+                #             return False
+                #         chapter_id_list = force_get_all_chapter(cx, course_url, flag)
+                #         print("强制获取单元数据失败，5秒后尝试再次获取")
+                #         time.sleep(5)
+                #     print("强制获取单元数据成功")
+                # else:
+                #     print("获取单元数据成功")
+
+                force = 2
+                if force == 2:  # 强制获取数据
                     err_time = 0
-                    print("开始强制获取单元数据")
-                    chapter_id_list = force_get_all_chapter(cx, course_url, flag)
+                    print("开始获取单元数据")
+                    chapter_id_list = get_all_objectid_by_json(cx, class_id, flag)
                     while not chapter_id_list:
                         err_time += 1
                         if err_time > 3:
                             return False
-                        chapter_id_list = force_get_all_chapter(cx, course_url, flag)
-                        print("强制获取单元数据失败，5秒后尝试再次获取")
+                        chapter_id_list = get_all_objectid_by_json(cx, class_id, flag)
+                        print("获取单元数据失败，5秒后尝试再次获取")
                         time.sleep(5)
-                    print("强制获取单元数据成功")
+                    print("获取单元数据成功")
                 else:
                     print("获取单元数据成功")
+
                 op = 3
         elif op == 3:  # 选择下载的类型
 
@@ -557,25 +711,40 @@ def user_select_func():
 
             # 获取所有下载地址信息
             print("共%d个课时，开始获取所有下载路径信息，预计用时%d秒" % (len(chapter_id_list), len(chapter_id_list) * 3))
-            all_dl_link = get_all_chapter_link(cx, chapter_id_list, types)
+            # all_dl_link = get_all_chapter_link(cx, chapter_id_list, types)
+            all_dl_link = get_download_info(cx, chapter_id_list, types)
             err_time = 0
             while not all_dl_link:
                 err_time += 1
                 if err_time > 3:
                     return False
-                all_dl_link = get_all_chapter_link(cx, chapter_id_list, types)
+                all_dl_link = get_download_info(cx, chapter_id_list, types)
                 print("获取获取所有下载路径失败，即将尝试再次获取")
             print("获取获取所有下载路径成功")
 
+            # 判断是否使用idm
+            code = input("请问是否使用idm下载【y/n】：")
+            idm_dl = 0
+            err_time = 0
+            while code not in ['y', 'Y', 'n', 'N']:
+                err_time += 1
+                if err_time > 3:
+                    return False
+                print("输入错误，请重新输入\n")
+                code = input("请问是否使用idm下载【y/n】：")
+            if code == 'y' or code == 'Y':
+                idm_dl = 1
+
             # 开始下载
             print('共%d个文件，即将开始下载' % len(all_dl_link))
-            download_file_mgr(cx, all_dl_link, dst, class_fict)
+            download_file_mgr(cx, all_dl_link, dst, class_fict, idm_dl)
             op = 1
             return False
 
 
 if __name__ == '__main__':
     user_select_func()
+
     '''下面用于测试的，已注释'''
     # cx = login_cx("", "")
     # course_list = get_all_course(cx)
